@@ -1,0 +1,103 @@
+from flask import Flask, request, jsonify
+from werkzeug.utils import secure_filename
+import os
+import jwt
+import bcrypt
+import datetime
+from flask_mail import Mail, Message
+from itsdangerous import URLSafeTimedSerializer
+
+app = Flask(__name__)
+
+app.config['SECRET_KEY'] = 'your_secret_key'
+app.config['UPLOAD_FOLDER'] = './uploads'
+app.config['MAIL_USERNAME'] = 'your_email@example.com'
+app.config['MAIL_PASSWORD'] = 'your_email_password'
+mail = Mail(app)
+
+def create_token(user_id, role):
+    payload = {
+        'user_id': user_id,
+        'role': role,
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+    }
+    return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+
+def verify_token(token):
+    try:
+        payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return None
+
+def send_verification_email(email, token):
+    link = f'http://localhost:5000/verify-email/{token}'
+    msg = Message('Verify your email', sender=app.config['MAIL_USERNAME'], recipients=[email])
+    msg.body = f'Click this link to verify your email: {link}'
+    mail.send(msg)
+
+def check_file_extension(filename):
+    allowed_extensions = ['pptx', 'docx', 'xlsx']
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_extensions
+
+@app.route('/signup', methods=['POST'])
+def signup():
+    data = request.json
+    email = data['email']
+    password = data['password']
+    hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+    
+    s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
+    token = s.dumps(email, salt='email-confirm')
+    send_verification_email(email, token)
+    
+    return jsonify({'message': 'Verification email sent'})
+
+@app.route('/verify-email/<token>', methods=['GET'])
+def verify_email(token):
+    s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
+    try:
+        email = s.loads(token, salt='email-confirm', max_age=3600)
+        return jsonify({'message': 'Email verified successfully'})
+    except Exception as e:
+        return jsonify({'message': 'Invalid or expired token'})
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    email = data['email']
+    password = data['password']
+    if bcrypt.checkpw(password.encode('utf-8'), stored_password_hash):
+        token = create_token(user_id, role)
+        return jsonify({'token': token})
+    return jsonify({'message': 'Invalid credentials'}), 401
+
+@app.route('/upload-file', methods=['POST'])
+def upload_file():
+    token = request.headers.get('Authorization')
+    user_data = verify_token(token)
+    if not user_data or user_data['role'] != 'ops':
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    if 'file' not in request.files:
+        return jsonify({'message': 'No file part'}), 400
+    file = request.files['file']
+    
+    if file and check_file_extension(file.filename):
+        filename = secure_filename(file.filename)
+        file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+        return jsonify({'message': 'File uploaded successfully'})
+    return jsonify({'message': 'Invalid file type'}), 400
+
+@app.route('/download-file/<file_id>', methods=['GET'])
+def download_file(file_id):
+    token = request.headers.get('Authorization')
+    user_data = verify_token(token)
+    if not user_data or user_data['role'] != 'client':
+        return jsonify({'message': 'Unauthorized'}), 403
+
+    secure_url = generate_secure_url(file_id)
+    return jsonify({'download-link': secure_url, 'message': 'success'})
+
+if __name__ == '__main__':
+    app.run(debug=True)
